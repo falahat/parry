@@ -956,19 +956,50 @@ impl PolygonalFeatureMap for ConvexPolyhedron {
         }
 
         let face = &self.faces[best_fid];
-        let i1 = face.first_vertex_or_edge;
-        // TODO: if there are more than 4 vertices, we need to select four vertices that maximize the area.
-        let num_vertices = face.num_vertices_or_edges.min(4);
-        let i2 = i1 + num_vertices;
-
-        for (i, (vid, eid)) in self.vertices_adj_to_face[i1 as usize..i2 as usize]
-            .iter()
-            .zip(self.edges_adj_to_face[i1 as usize..i2 as usize].iter())
-            .enumerate()
-        {
-            out_feature.vertices[i] = self.points[*vid as usize];
-            out_feature.vids[i] = PackedFeatureId::vertex(*vid);
-            out_feature.eids[i] = PackedFeatureId::edge(*eid);
+        let first = face.first_vertex_or_edge as usize;
+        let count = face.num_vertices_or_edges as usize;
+        let vertices = &self.vertices_adj_to_face[first..first + count];
+        let point = |i: usize| self.points[vertices[i] as usize];
+        let area = |a: usize, b: usize, c: usize| {
+            (point(b) - point(a)).cross(point(c) - point(a)).dot(face.normal).abs()
+        };
+        let mut selected = [0, 1, 2, 3];
+        if count > 4 {
+            // Rotating calipers: for each diagonal, maximize the triangles on
+            // its two sides. Both opposite vertices advance monotonically.
+            let mut best_area = 0.0;
+            for a in 0..count - 3 {
+                let mut b = a + 1;
+                let mut d = a + 3;
+                for c in a + 2..count - 1 {
+                    while b + 1 < c && area(a, b + 1, c) > area(a, b, c) {
+                        b += 1;
+                    }
+                    d = d.max(c + 1);
+                    while d + 1 < count && area(a, c, d + 1) > area(a, c, d) {
+                        d += 1;
+                    }
+                    let candidate_area = area(a, b, c) + area(a, c, d);
+                    if candidate_area > best_area {
+                        best_area = candidate_area;
+                        selected = [a, b, c, d];
+                    }
+                }
+            }
+        }
+        let num_vertices = count.min(4);
+        for i in 0..num_vertices {
+            let index = selected[i];
+            let next = selected[(i + 1) % num_vertices];
+            let vid = vertices[index];
+            out_feature.vertices[i] = self.points[vid as usize];
+            out_feature.vids[i] = PackedFeatureId::vertex(vid);
+            // A chord lies inside the original face, not on one of its edges.
+            out_feature.eids[i] = if next == (index + 1) % count {
+                PackedFeatureId::edge(self.edges_adj_to_face[first + index])
+            } else {
+                PackedFeatureId::face(best_fid as u32)
+            };
         }
 
         out_feature.fid = PackedFeatureId::face(best_fid as u32);
